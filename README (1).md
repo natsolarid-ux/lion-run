@@ -6,7 +6,7 @@ A browser-based endless runner game built with vanilla HTML5 Canvas. Play as a l
 
 ## 🎮 Play
 
-Open `dino-run.html` in any modern browser. No server, no dependencies, no installation.
+Open `lion-run.html` in any modern browser. No server, no dependencies, no installation.
 
 ---
 
@@ -81,7 +81,7 @@ Open `dino-run.html` in any modern browser. No server, no dependencies, no insta
 
 ```
 lion-run/
-└── dino-run.html    # The entire game — open this in a browser
+└── lion-run.html    # The entire game — open this in a browser
 ```
 
 ---
@@ -91,7 +91,7 @@ lion-run/
 ```bash
 git clone https://github.com/yourusername/lion-run.git
 cd lion-run
-open dino-run.html   # macOS
+open lion-run.html   # macOS
 # or just double-click the file in your file explorer
 ```
 

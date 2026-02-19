@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LION RUN</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a0a00;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  font-family: 'Courier New', monospace;
+  gap: 10px;
+}
+#gameCanvas {
+  border: 2px solid #ff6600;
+  box-shadow: 0 0 40px rgba(255,102,0,0.4);
+  cursor: pointer;
+  display: block;
+}
+#info {
+  color: #ff9944;
+  font-size: 13px;
+  letter-spacing: 2px;
+  opacity: 0.7;
+}
+#controls {
+  display: flex;
+  gap: 10px;
+}
+#controls button {
+  padding: 12px 28px;
+  background: transparent;
+  border: 2px solid #ff6600;
+  color: #ff9944;
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  letter-spacing: 2px;
+}
+#controls button:active {
+  background: #ff6600;
+  color: #111;
+}
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+<div id="info">SPACE · ↑ · CLICK · TAP = JUMP &nbsp;|&nbsp; ↓ = DUCK</div>
+<div id="controls">
+  <button id="jumpBtn">▲ JUMP</button>
+  <button id="duckBtn">▼ DUCK</button>
+</div>
+
+<script>
+// =============================================================
+//  CANVAS
+// =============================================================
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const W = 800;
+const H = 300;
+canvas.width  = W;
+canvas.height = H;
+
+// Ground level — dino stands here
+const GROUND = 230;
+
+// =============================================================
+//  PHYSICS — tuned to match Google dino feel
+//  Jump lasts ~1 second, reaches ~120px height
+// =============================================================
+const GRAVITY    =  0.55;   // px per frame² — gentle arc
+const JUMP_FORCE = -13.5;   // initial upward velocity
+const JUMP2_FORCE= -11.0;   // double jump
+
+// =============================================================
+//  STATE
+// =============================================================
+let gameRunning = false;
+let gameOver    = false;
+let score       = 0;
+let hiScore     = +(localStorage.getItem('dino_hi') || 0);
+let speed       = 6;         // px/frame obstacle speed
+let lives, nextLifeAt;
+let frame       = 0;
+let spawnCD     = 80;        // frames until next obstacle
+
+// Dino
+const DINO_W = 26;
+const DINO_H = 52;
+const DINO_X = 80;
+
+let dinoY    = GROUND - DINO_H;  // top-left Y
+let dinoVY   = 0;                 // vertical velocity
+let jumping  = false;             // is airborne?
+let jumpCount= 0;                 // 0=ground, 1=first jump, 2=double
+let ducking  = false;
+
+const DUCK_W = 38;
+const DUCK_H = 30;
+
+// Obstacles & effects
+let obstacles = [];
+let particles = [];
+let groundOff = 0;
+let flashTimer = 0;
+
+// =============================================================
+//  JUMP — the ONE function that handles jumping
+// =============================================================
+function doJump() {
+  if (!gameRunning) {
+    startGame();
+    return;
+  }
+  if (gameOver) {
+    startGame();
+    return;
+  }
+  // Cancel duck
+  if (ducking) {
+    ducking = false;
+    return;
+  }
+  // Allow jump from ground OR double-jump
+  if (jumpCount < 2) {
+    dinoVY    = jumpCount === 0 ? JUMP_FORCE : JUMP2_FORCE;
+    jumping   = true;
+    jumpCount++;
+    // Dust particles
+    for (let i = 0; i < 8; i++) {
+      const a = Math.PI + (Math.random() - 0.5) * 1.2;
+      const spd = 1.5 + Math.random() * 2.5;
+      particles.push({
+        x: DINO_X + DINO_W / 2, y: GROUND,
+        vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 1,
+        life: 1, r: 3 + Math.random() * 3,
+        color: '#c07030'
+      });
+    }
+  }
+}
+
+function duckOn()  { if (gameRunning && !gameOver) ducking = true; }
+function duckOff() { ducking = false; }
+
+// =============================================================
+//  INPUT — attached everywhere to guarantee it fires
+// =============================================================
+function onKey(e) {
+  if (e.code === 'ArrowUp'   || e.code === 'Space') { e.preventDefault(); doJump(); }
+  if (e.code === 'ArrowDown')                        { e.preventDefault(); duckOn(); }
+}
+function onKeyUp(e) {
+  if (e.code === 'ArrowDown') duckOff();
+}
+
+window.addEventListener('keydown',   onKey,   { passive: false });
+document.addEventListener('keydown', onKey,   { passive: false });
+window.addEventListener('keyup',     onKeyUp);
+document.addEventListener('keyup',   onKeyUp);
+
+canvas.addEventListener('click',      () => doJump());
+canvas.addEventListener('touchstart', (e) => { e.preventDefault(); doJump(); }, { passive: false });
+
+document.getElementById('jumpBtn').addEventListener('mousedown',  (e) => { e.preventDefault(); doJump(); });
+document.getElementById('jumpBtn').addEventListener('touchstart', (e) => { e.preventDefault(); doJump(); }, { passive: false });
+document.getElementById('duckBtn').addEventListener('mousedown',  (e) => { e.preventDefault(); duckOn(); });
+document.getElementById('duckBtn').addEventListener('mouseup',    (e) => { e.preventDefault(); duckOff(); });
+document.getElementById('duckBtn').addEventListener('touchstart', (e) => { e.preventDefault(); duckOn(); }, { passive: false });
+document.getElementById('duckBtn').addEventListener('touchend',   (e) => { e.preventDefault(); duckOff(); }, { passive: false });
+
+// =============================================================
+//  SPAWN OBSTACLES
+// =============================================================
+function spawnObstacle() {
+  const r = Math.random();
+  if (r < 0.65) {
+    // CACTUS — 5 variants (no thin), every 100pts unlock harder ones
+    const maxV = Math.min(5, 2 + Math.floor(score/100));
+    const variant = Math.floor(Math.random() * maxV);
+    let h, w, count, style;
+    if (variant === 0) { h=28; w=16; count=1; style='short'; }
+    else if (variant === 1) { h=50; w=18; count=1; style='tall'; }
+    else if (variant === 2) { h=36; w=16; count=1; style='wide'; }
+    else if (variant === 3) { h=40; w=32; count=2; style='double'; }
+    else               { h=44; w=48; count=3; style='triple'; }
+    obstacles.push({ type:'cactus', x:W+20, y:GROUND-h, w, h, count, style });
+  } else if (r < 0.82) {
+    // BIRD
+    const low = Math.random() < 0.5;
+    const bH = 24;
+    const bY = low ? GROUND-DUCK_H-bH-2 : GROUND-DINO_H-bH-10;
+    const dive = Math.floor(score/100) > 0;
+    obstacles.push({ type:'bird', x:W+20, y:bY, w:46, h:bH, wing:0, dive, diveT:0 });
+  } else {
+    const s = 18 + Math.random()*10;
+    obstacles.push({ type:'rock', x:W+20, y:GROUND-s, w:s*1.3, h:s, rot:0, rotSpd:(Math.random()-0.5)*0.04 });
+  }
+}
+
+// =============================================================
+//  UPDATE
+// =============================================================
+function update() {
+  frame++;
+  score += 0.08;
+
+  // Start slow, +0.5 every 100 points
+  const prevLevel = Math.floor((score - speed*0.025) / 100);
+  const newLevel  = Math.floor(score / 100);
+  if (newLevel > prevLevel) ding();  // DING every 100 pts
+  speed = 4 + newLevel * 0.5;
+  if (speed > 16) speed = 16;
+  // Extra life every 500 points
+  if (score >= nextLifeAt) {
+    lives = Math.min(lives + 1, 9);
+    nextLifeAt += 500;
+    lifeUpEffect();
+  }
+
+  groundOff = (groundOff + speed) % 60;
+  if (flashTimer > 0) flashTimer--;
+
+  // ── DINO PHYSICS ────────────────────────────────────────
+  if (jumping) {
+    dinoVY += GRAVITY;
+    dinoY  += dinoVY;
+
+    // Landed?
+    if (dinoY >= GROUND - DINO_H) {
+      dinoY     = GROUND - DINO_H;
+      dinoVY    = 0;
+      jumping   = false;
+      jumpCount = 0;
+    }
+  } else {
+    // Glued to ground
+    dinoY = GROUND - DINO_H;
+  }
+
+  // ── SPAWN OBSTACLES ─────────────────────────────────────
+  spawnCD -= speed * 0.5;
+  if (spawnCD <= 0 || obstacles.length === 0) {
+    spawnObstacle();
+    // Gap = enough time so player has ~1 second to react
+    // At speed=6 → 60px/sec. 1 second gap = 300-500px gap
+    const minGap = Math.max(180, 380 - score * 0.25);
+    spawnCD = minGap + Math.random() * 140;
+  }
+
+  // ── MOVE & COLLIDE OBSTACLES ─────────────────────────────
+  // Tight hitboxes - touching = dying, small pad just for sprite vs box mismatch
+  const PAD  = 5;
+  const dh   = ducking ? DUCK_H : DINO_H;
+  const dTop   = (ducking ? GROUND - DUCK_H : dinoY) + PAD;
+  const dBot   = (ducking ? GROUND - DUCK_H : dinoY) + dh  - PAD;
+  // Hitbox = slim body only (not the head which extends left)
+  const dLeft  = DINO_X + 8;
+  const dRight = DINO_X + 30;
+
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const o = obstacles[i];
+    o.x -= speed;
+
+    if (o.type === 'bird') {
+      o.wing += 0.2;
+      if (o.dive && o.x < W * 0.6) {
+        // dive smoothly toward dino head level
+        const targetY = GROUND - DINO_H - o.h/2;
+        o.y += (targetY - o.y) * 0.04;
+      }
+    }
+    if (o.type === 'rock')  o.rot  += o.rotSpd;
+
+    // Remove off-screen
+    if (o.x + o.w < -20) {
+      obstacles.splice(i, 1);
+      continue;
+    }
+
+    // Obstacle hitbox - small pad to account for drawn sprite vs logical rect
+    const oLeft  = o.x + PAD;
+    const oRight = o.x + o.w - PAD;
+    const oTop   = o.y + PAD;
+    const oBot   = o.y + o.h - PAD;
+
+    if (dRight > oLeft && dLeft < oRight && dBot > oTop && dTop < oBot) {
+      triggerGameOver();
+      return;
+    }
+  }
+
+  // ── PARTICLES ─────────────────────────────────────────────
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x    += p.vx;
+    p.y    += p.vy;
+    p.vy   += 0.18;
+    p.life -= 0.035;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// =============================================================
+//  GAME OVER / START
+// =============================================================
+function triggerGameOver() {
+  lives--;
+  flashTimer = 18;
+  // Hit particles
+  for (let i = 0; i < 20; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const spd = 1 + Math.random() * 4;
+    particles.push({
+      x: DINO_X + DINO_W / 2, y: dinoY + DINO_H / 2,
+      vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 2,
+      life: 1, r: 2 + Math.random() * 4,
+      color: lives > 0 ? '#ff8800' : '#ff2200'
+    });
+  }
+  if (lives > 0) {
+    // Still alive — brief invincibility, clear nearby obstacles
+    obstacles = obstacles.filter(o => o.x > DINO_X + 120);
+    return;
+  }
+  // Truly dead
+  gameOver   = true;
+  gameRunning= false;
+  flashTimer = 25;
+  if (score > hiScore) {
+    hiScore = Math.floor(score);
+    localStorage.setItem('dino_hi', hiScore);
+  }
+  for (let i = 0; i < 35; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const spd = 1 + Math.random() * 6;
+    particles.push({
+      x: DINO_X + DINO_W / 2, y: dinoY + DINO_H / 2,
+      vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 2,
+      life: 1, r: 2 + Math.random() * 6,
+      color: Math.random() < 0.5 ? '#ff4400' : '#ffcc00'
+    });
+  }
+}
+
+function lifeUpEffect() {
+  // Green sparkle burst
+  for (let i = 0; i < 20; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const spd = 1.5 + Math.random() * 3;
+    particles.push({
+      x: DINO_X + DINO_W / 2, y: dinoY + DINO_H / 2,
+      vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 3,
+      life: 1, r: 2 + Math.random() * 4, color: '#44ff88'
+    });
+  }
+  // Play a life-up sound (ascending ding)
+  try {
+    const AC = new (window.AudioContext||window.webkitAudioContext)();
+    [[523,0],[659,0.12],[784,0.24],[1047,0.36]].forEach(([f,t])=>{
+      const o=AC.createOscillator(), g=AC.createGain();
+      o.connect(g); g.connect(AC.destination);
+      o.frequency.value=f; o.type='sine';
+      g.gain.setValueAtTime(0.2,AC.currentTime+t);
+      g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+t+0.28);
+      o.start(AC.currentTime+t); o.stop(AC.currentTime+t+0.32);
+    });
+  } catch(e){}
+}
+
+function startGame() {
+  score      = 0;
+  speed      = 6;
+  frame      = 0;
+  spawnCD    = 80;
+  lives      = 3;
+  nextLifeAt = 500;
+  dinoY      = GROUND - DINO_H;
+  dinoVY     = 0;
+  jumping    = false;
+  jumpCount  = 0;
+  ducking    = false;
+  obstacles  = [];
+  particles  = [];
+  groundOff  = 0;
+  flashTimer = 0;
+  gameOver   = false;
+  gameRunning= true;
+}
+
+// =============================================================
+//  DRAW T-REX
+// =============================================================
+function drawDino() {
+  const x = DINO_X;
+  const swing = jumping ? 0 : Math.sin(frame * 0.32) * 9;
+  const FUR='#c8850a', DARK='#8a5500', MANE='#5c2d00', MANE2='#8b4010', BELLY='#e8b040', NOSE='#d06060';
+  ctx.save();
+
+  if (ducking) {
+    const y = GROUND - DUCK_H;
+    // tail on LEFT
+    ctx.strokeStyle=DARK; ctx.lineWidth=5; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(x+2,y+DUCK_H-4); ctx.quadraticCurveTo(x-14,y+DUCK_H-18,x-10,y+DUCK_H-30); ctx.stroke();
+    ctx.fillStyle=MANE; ctx.beginPath(); ctx.arc(x-10,y+DUCK_H-32,5,0,Math.PI*2); ctx.fill();
+    // body
+    fillRR(x+2,y+4,32,DUCK_H-6,8,FUR); strokeRR(x+2,y+4,32,DUCK_H-6,8,DARK,2);
+    ctx.globalAlpha=0.25; fillRR(x+6,y+10,20,DUCK_H-14,5,BELLY); ctx.globalAlpha=1;
+    // mane spikes around head (RIGHT side)
+    const hcx2=x+38, hcy2=y-4;
+    for(let a=0;a<12;a++){
+      const ang=a/12*Math.PI*2;
+      ctx.fillStyle=a%2===0?MANE:MANE2;
+      ctx.beginPath(); ctx.ellipse(hcx2+Math.cos(ang)*16,hcy2+Math.sin(ang)*13,7,4,ang,0,Math.PI*2); ctx.fill();
+    }
+    // head on RIGHT
+    ctx.fillStyle=FUR; ctx.beginPath(); ctx.ellipse(hcx2,hcy2,16,13,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=DARK; ctx.lineWidth=1.5; ctx.stroke();
+    // muzzle RIGHT
+    ctx.fillStyle=BELLY; ctx.beginPath(); ctx.ellipse(hcx2+16,hcy2-2,10,7,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=NOSE; ctx.beginPath(); ctx.ellipse(hcx2+22,hcy2-5,5,3.5,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=DARK;
+    ctx.beginPath(); ctx.ellipse(hcx2+20,hcy2-5,1.5,1,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(hcx2+24,hcy2-5,1.5,1,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=DARK; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(hcx2+22,hcy2-2); ctx.lineTo(hcx2+22,hcy2+2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hcx2+22,hcy2+2); ctx.lineTo(hcx2+25,hcy2+5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hcx2+22,hcy2+2); ctx.lineTo(hcx2+19,hcy2+5); ctx.stroke();
+    ctx.fillStyle='#f8f0e0';
+    ctx.beginPath(); ctx.moveTo(hcx2+20,hcy2); ctx.lineTo(hcx2+22,hcy2); ctx.lineTo(hcx2+21,hcy2+5); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(hcx2+24,hcy2); ctx.lineTo(hcx2+26,hcy2); ctx.lineTo(hcx2+25,hcy2+5); ctx.closePath(); ctx.fill();
+    // eye RIGHT
+    circle(hcx2+8,hcy2-10,4.5,'#a0700a'); circle(hcx2+8.5,hcy2-10.5,2.2,'#ffe060'); circle(hcx2+8,hcy2-10,1.2,'#111');
+    // ear RIGHT
+    ctx.fillStyle=FUR; ctx.beginPath(); ctx.moveTo(hcx2+6,hcy2-14); ctx.lineTo(hcx2+16,hcy2-26); ctx.lineTo(hcx2+18,hcy2-12); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle=DARK; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle=NOSE; ctx.globalAlpha=0.5;
+    ctx.beginPath(); ctx.moveTo(hcx2+8,hcy2-14); ctx.lineTo(hcx2+15,hcy2-23); ctx.lineTo(hcx2+16,hcy2-13); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha=1;
+    // paws
+    ctx.strokeStyle=DARK; ctx.lineWidth=4; ctx.lineCap='round';
+    line(x+10,y+DUCK_H,x+8,y+DUCK_H+9+swing);
+    line(x+24,y+DUCK_H,x+26,y+DUCK_H+9-swing);
+    ctx.fillStyle=DARK;
+    ctx.beginPath(); ctx.ellipse(x+8,y+DUCK_H+11+swing,5,3,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+26,y+DUCK_H+11-swing,5,3,0,0,Math.PI*2); ctx.fill();
+  } else {
+    const y = dinoY;
+    // TAIL on LEFT
+    ctx.strokeStyle=DARK; ctx.lineWidth=6; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(x+4,y+34); ctx.quadraticCurveTo(x-18,y+20+Math.sin(frame*0.15)*8,x-22,y+6); ctx.stroke();
+    ctx.strokeStyle=FUR; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(x+4,y+33); ctx.quadraticCurveTo(x-16,y+20+Math.sin(frame*0.15)*8,x-20,y+7); ctx.stroke();
+    ctx.fillStyle=MANE; ctx.beginPath(); ctx.arc(x-22,y+4,7,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=MANE2; ctx.beginPath(); ctx.arc(x-22,y+4,4,0,Math.PI*2); ctx.fill();
+    // body
+    fillRR(x+4,y+14,28,DINO_H-14,10,FUR); strokeRR(x+4,y+14,28,DINO_H-14,10,DARK,2);
+    ctx.globalAlpha=0.3; fillRR(x+8,y+22,18,DINO_H-28,7,BELLY); ctx.globalAlpha=1;
+    ctx.fillStyle=FUR; ctx.beginPath(); ctx.ellipse(x+8,y+18,10,8,0,0,Math.PI*2); ctx.fill();
+    // neck
+    fillRR(x+10,y+4,20,16,6,FUR); strokeRR(x+10,y+4,20,16,6,DARK,2);
+    // MANE around head on RIGHT
+    const hcx=x+36, hcy=y+2;
+    for(let a=0;a<16;a++){
+      const ang=-Math.PI*0.5+a/16*Math.PI*1.8-0.2;
+      ctx.strokeStyle=a%3===0?MANE:a%3===1?MANE2:'#7a3808';
+      ctx.lineWidth=4+Math.sin(a)*1.5; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(hcx+Math.cos(ang)*16,hcy+Math.sin(ang)*16); ctx.lineTo(hcx+Math.cos(ang)*26,hcy+Math.sin(ang)*26); ctx.stroke();
+    }
+    const mg=ctx.createRadialGradient(hcx,hcy,8,hcx,hcy,22);
+    mg.addColorStop(0,'rgba(92,45,0,0.6)'); mg.addColorStop(0.6,'rgba(139,64,16,0.5)'); mg.addColorStop(1,'rgba(92,45,0,0)');
+    ctx.fillStyle=mg; ctx.beginPath(); ctx.arc(hcx,hcy,22,0,Math.PI*2); ctx.fill();
+    // head on RIGHT
+    ctx.fillStyle=FUR; ctx.beginPath(); ctx.ellipse(hcx,hcy,17,15,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=DARK; ctx.lineWidth=1.5; ctx.stroke();
+    // muzzle RIGHT
+    ctx.fillStyle=BELLY; ctx.beginPath(); ctx.ellipse(hcx+16,hcy+2,12,9,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=NOSE; ctx.beginPath(); ctx.ellipse(hcx+24,hcy-2,6,4.5,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=DARK;
+    ctx.beginPath(); ctx.ellipse(hcx+21.5,hcy-2,2,1.3,0.3,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(hcx+26.5,hcy-2,2,1.3,-0.3,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=DARK; ctx.lineWidth=1.8; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(hcx+24,hcy+2); ctx.lineTo(hcx+24,hcy+6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hcx+24,hcy+6); ctx.lineTo(hcx+28,hcy+10); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hcx+24,hcy+6); ctx.lineTo(hcx+20,hcy+10); ctx.stroke();
+    ctx.fillStyle='#f8f0e0';
+    ctx.beginPath(); ctx.moveTo(hcx+20,hcy+2); ctx.lineTo(hcx+22,hcy+2); ctx.lineTo(hcx+21,hcy+7); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(hcx+26,hcy+2); ctx.lineTo(hcx+28,hcy+2); ctx.lineTo(hcx+27,hcy+7); ctx.closePath(); ctx.fill();
+    // whiskers
+    ctx.fillStyle=DARK;
+    for(let i=0;i<3;i++){ ctx.beginPath(); ctx.arc(hcx+12-i*2,hcy+1+i,1,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(hcx+12-i*2,hcy-2-i,1,0,Math.PI*2); ctx.fill(); }
+    ctx.strokeStyle='rgba(60,30,0,0.5)'; ctx.lineWidth=1; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(hcx+10,hcy); ctx.lineTo(hcx-4,hcy-2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hcx+10,hcy+3); ctx.lineTo(hcx-4,hcy+5); ctx.stroke();
+    // ears RIGHT
+    ctx.fillStyle=FUR; ctx.beginPath(); ctx.moveTo(hcx-4,hcy-12); ctx.lineTo(hcx-14,hcy-26); ctx.lineTo(hcx-16,hcy-10); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle=DARK; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle=NOSE; ctx.globalAlpha=0.5;
+    ctx.beginPath(); ctx.moveTo(hcx-6,hcy-12); ctx.lineTo(hcx-13,hcy-22); ctx.lineTo(hcx-14,hcy-11); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha=1;
+    ctx.fillStyle=FUR; ctx.beginPath(); ctx.moveTo(hcx+2,hcy-14); ctx.lineTo(hcx-4,hcy-26); ctx.lineTo(hcx-8,hcy-12); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle=DARK; ctx.lineWidth=1; ctx.stroke();
+    // eye RIGHT
+    circle(hcx-4,hcy-6,5.5,'#7a5000'); circle(hcx-4.5,hcy-6.5,3,'#f5d060'); circle(hcx-4,hcy-6,1.5,'#111');
+    ctx.strokeStyle='#111'; ctx.lineWidth=0.8;
+    ctx.beginPath(); ctx.moveTo(hcx-4,hcy-8.5); ctx.lineTo(hcx-4,hcy-3.5); ctx.stroke();
+    ctx.strokeStyle=DARK; ctx.lineWidth=2; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(hcx+2,hcy-11); ctx.lineTo(hcx-10,hcy-12); ctx.stroke();
+    // tiny arms
+    ctx.strokeStyle=DARK; ctx.lineWidth=4; ctx.lineCap='round';
+    line(x+14,y+20,x+6,y+28); line(x+6,y+28,x+9,y+33); line(x+6,y+28,x+3,y+33);
+    ctx.lineWidth=2; line(x+9,y+33,x+11,y+36); line(x+3,y+33,x+1,y+36);
+    // legs
+    ctx.strokeStyle=DARK; ctx.lineWidth=5; ctx.lineCap='round';
+    line(x+8,y+DINO_H-2,x+5,y+DINO_H+swing+8);
+    line(x+20,y+DINO_H-2,x+23,y+DINO_H-swing+8);
+    ctx.lineWidth=4;
+    line(x+5,y+DINO_H+swing+8,x+3,y+DINO_H+swing+16);
+    line(x+23,y+DINO_H-swing+8,x+25,y+DINO_H-swing+16);
+    ctx.fillStyle=DARK;
+    if(!jumping){
+      ctx.beginPath(); ctx.ellipse(x+3,y+DINO_H+swing+17,5,3,0,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x+25,y+DINO_H-swing+17,5,3,0,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle=DARK; ctx.lineWidth=1.5;
+      for(let i=0;i<3;i++){ ctx.beginPath(); ctx.moveTo(x+2+i*2,y+DINO_H+swing+18); ctx.lineTo(x+4+i*2,y+DINO_H+swing+22); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x+24+i*2,y+DINO_H-swing+18); ctx.lineTo(x+26+i*2,y+DINO_H-swing+22); ctx.stroke(); }
+    } else {
+      ctx.beginPath(); ctx.ellipse(x+3,y+DINO_H+18,5,3,0,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x+25,y+DINO_H+18,5,3,0,0,Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+
+
+
+
+// =============================================================
+//  DRAW CACTUS
+// =============================================================
+function drawOneCactus(cx, by, bh, style) {
+  ctx.save();
+  if(style==='short'){
+    // THORNBUSH
+    ctx.fillStyle='#5a6820'; ctx.beginPath(); ctx.ellipse(cx+10,by+bh*0.5,22,bh*0.55,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#4a5818'; ctx.beginPath(); ctx.ellipse(cx+4,by+bh*0.6,15,bh*0.45,-0.3,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx+18,by+bh*0.55,14,bh*0.4,0.3,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#8a9030'; ctx.lineWidth=1.5; ctx.lineCap='round';
+    for(let i=0;i<6;i++){const tx=cx+2+i*5,ty=by+bh*0.3+Math.sin(i)*10;ctx.beginPath();ctx.moveTo(tx,ty);ctx.lineTo(tx-3,ty-8);ctx.stroke();ctx.beginPath();ctx.moveTo(tx,ty);ctx.lineTo(tx+3,ty-6);ctx.stroke();}
+    ctx.fillStyle='#6a4010'; ctx.fillRect(cx+8,by+bh*0.82,6,bh*0.18);
+  } else if(style==='wide'){
+    // ACACIA UMBRELLA TREE
+    const trunkH=bh*0.55, tx=cx+10;
+    fillRR(tx,by+bh-trunkH,7,trunkH,3,'#6a4010'); strokeRR(tx,by+bh-trunkH,7,trunkH,3,'#4a2800',1.5);
+    ctx.strokeStyle='rgba(100,60,15,0.3)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(tx+2,by+bh-trunkH+4); ctx.lineTo(tx+2,by+bh-4); ctx.stroke();
+    ctx.fillStyle='#4a6818'; ctx.beginPath(); ctx.ellipse(tx+3,by+bh-trunkH-4,28,9,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#5a7820'; ctx.beginPath(); ctx.ellipse(tx-2,by+bh-trunkH-8,22,7,-0.1,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(tx+10,by+bh-trunkH-6,18,6,0.1,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#3a5010'; ctx.lineWidth=8; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(tx-22,by+bh-trunkH-1); ctx.lineTo(tx+26,by+bh-trunkH-1); ctx.stroke();
+  } else {
+    // TALL SAVANNA GRASS
+    const blades=style==='triple'?5:style==='double'?4:3;
+    for(let i=0;i<blades;i++){
+      const bx=cx+i*(style==='double'?7:style==='triple'?6:5);
+      const bHi=bh*(0.7+Math.sin(i*1.7)*0.3);
+      const sway=Math.sin(frame*0.08+i*1.2)*3;
+      ctx.strokeStyle=i%2===0?'#8a9820':'#6a7818'; ctx.lineWidth=5; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(bx+3,GROUND); ctx.quadraticCurveTo(bx+3+sway,GROUND-bHi*0.5,bx+6+sway*2,GROUND-bHi); ctx.stroke();
+      ctx.fillStyle='#c8a030'; ctx.beginPath(); ctx.ellipse(bx+6+sway*2,GROUND-bHi-5,4,8,0.2,0,Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+
+
+function drawCactus(o) {
+  ctx.save();
+  const spacing=o.style==='double'?16:o.style==='triple'?14:0;
+  for(let i=0;i<o.count;i++){
+    const cx=o.x+i*spacing;
+    const bh=Math.max(14,o.h+(i===0?0:i===1?-8:-14));
+    drawOneCactus(cx,GROUND-bh,bh,i===0?o.style:'tall');
+  }
+  ctx.restore();
+}
+
+
+
+// =============================================================
+//  DRAW BIRD
+// =============================================================
+function drawBird(o) {
+  const cx=o.x+o.w/2, cy=o.y+o.h/2;
+  const flap=Math.sin(o.wing)*16;
+  const diving=o.dive&&o.x<W*0.6;
+  ctx.save(); ctx.translate(cx,cy); ctx.rotate(diving?0.45:0);
+  // wings dark brown
+  ctx.strokeStyle='#2a1800'; ctx.lineWidth=4.5; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-10,0); ctx.quadraticCurveTo(-30,-flap,-20,-flap*0.4); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(10,0); ctx.quadraticCurveTo(30,-flap,20,-flap*0.4); ctx.stroke();
+  ctx.strokeStyle='#4a2800'; ctx.lineWidth=2;
+  for(let i=0;i<4;i++){
+    const fx=-14-i*4, fy=-flap*(0.3+i*0.08);
+    ctx.beginPath(); ctx.moveTo(fx,fy); ctx.lineTo(fx-3,fy+8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(14+i*4,fy); ctx.lineTo(17+i*4,fy+8); ctx.stroke();
+  }
+  // body
+  ctx.fillStyle='#3a2010'; ctx.beginPath(); ctx.ellipse(0,0,13,9,0,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#5a3010'; ctx.lineWidth=1.5; ctx.stroke();
+  // vulture bald head faces LEFT
+  ctx.fillStyle='#cc4433'; ctx.beginPath(); ctx.arc(-14,-3,9,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#aa2222'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.arc(-14,-3,7,Math.PI*0.8,Math.PI*1.6); ctx.stroke();
+  ctx.beginPath(); ctx.arc(-14,-3,5,Math.PI*0.6,Math.PI*1.8); ctx.stroke();
+  // hooked beak
+  ctx.fillStyle='#d4aa30';
+  ctx.beginPath(); ctx.moveTo(-22,-5); ctx.lineTo(-33,-4); ctx.lineTo(-30,1); ctx.lineTo(-22,0); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-33,-4); ctx.lineTo(-37,-2); ctx.lineTo(-33,2); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle='#aa8010'; ctx.lineWidth=1; ctx.stroke();
+  // eye
+  ctx.fillStyle='#ffee00'; ctx.beginPath(); ctx.arc(-18,-6,3,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(-18.3,-6.3,1.4,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#880000'; ctx.lineWidth=2; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-23,-11); ctx.lineTo(-10,-8); ctx.stroke();
+  // neck ruff
+  ctx.fillStyle='#2a1500'; ctx.beginPath(); ctx.arc(-5,4,7,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+
+
+// =============================================================
+//  DRAW ROCK
+// =============================================================
+function drawRock(o) {
+  ctx.save();
+  ctx.translate(o.x+o.w/2,o.y+o.h/2); ctx.rotate(o.rot);
+  const rx=o.w/2, ry=o.h/2;
+  const g=ctx.createRadialGradient(-rx*0.25,-ry*0.3,0,0,0,Math.max(rx,ry)*1.1);
+  g.addColorStop(0,'#c0a070'); g.addColorStop(0.4,'#9a7850'); g.addColorStop(0.8,'#7a5a38'); g.addColorStop(1,'#4a3010');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.ellipse(0,0,rx,ry,0,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#6a4820'; ctx.lineWidth=2; ctx.stroke();
+  ctx.strokeStyle='rgba(50,25,5,0.35)'; ctx.lineWidth=1.2;
+  ctx.beginPath(); ctx.moveTo(-rx*0.3,-ry*0.5); ctx.lineTo(rx*0.1,ry*0.3); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(rx*0.2,-ry*0.3); ctx.lineTo(-rx*0.1,ry*0.5); ctx.stroke();
+  ctx.fillStyle='rgba(60,100,20,0.25)'; ctx.beginPath(); ctx.ellipse(-rx*0.2,-ry*0.4,rx*0.35,ry*0.25,-0.4,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='rgba(255,220,160,0.18)'; ctx.beginPath(); ctx.ellipse(-rx*0.25,-ry*0.3,rx*0.4,ry*0.3,-0.3,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+
+// =============================================================
+//  DRAW BACKGROUND
+// =============================================================
+function drawBG() {
+  // Biome changes every 100 points
+  const biome = Math.floor(score / 100) % 5;
+  // 0=day, 1=sunset(already had), 2=night, 3=cloudy, 4=snow, (rain handled separately)
+
+  // ── SKY ──
+  let skyColors;
+  if (biome === 0) { // Day — blue sky
+    skyColors = [['#1a6aaa',0],['#4a9ade',0.5],['#7ec8f5',0.85],['#c8eeff',1]];
+  } else if (biome === 1) { // Dusk/sunset
+    skyColors = [['#1a0800',0],['#7a2000',0.4],['#d84e1a',0.75],['#ffb040',1]];
+  } else if (biome === 2) { // Night — dark blue with stars
+    skyColors = [['#000010',0],['#050520',0.4],['#0a0a35',0.8],['#101040',1]];
+  } else if (biome === 3) { // Cloudy — grey overcast
+    skyColors = [['#404050',0],['#606070',0.4],['#808090',0.8],['#a0a0a8',1]];
+  } else { // Snow — pale cold sky
+    skyColors = [['#8ab0c8',0],['#b0cce0',0.4],['#d0e4f0',0.8],['#e8f4ff',1]];
+  }
+  const sky = ctx.createLinearGradient(0,0,0,GROUND);
+  for(const [col,stop] of skyColors) sky.addColorStop(stop,col);
+  ctx.fillStyle=sky; ctx.fillRect(0,0,W,GROUND);
+
+  // ── NIGHT STARS ──
+  if (biome === 2) {
+    ctx.fillStyle='#ffffff';
+    for(let i=0;i<80;i++){
+      const sx=(Math.sin(i*137.5)*0.5+0.5)*W;
+      const sy=(Math.sin(i*251.3)*0.5+0.5)*GROUND*0.85;
+      const sr=Math.sin(frame*0.05+i)*0.5+0.8;
+      ctx.globalAlpha=0.4+Math.sin(frame*0.03+i*0.7)*0.3;
+      ctx.beginPath(); ctx.arc(sx,sy,sr,0,Math.PI*2); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+    // Moon
+    const mx=W*0.8, my=GROUND*0.18;
+    ctx.fillStyle='#fffae0';
+    ctx.beginPath(); ctx.arc(mx,my,28,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#c8c080'; ctx.globalAlpha=0.3;
+    ctx.beginPath(); ctx.arc(mx+6,my-4,10,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(mx-8,my+8,6,0,Math.PI*2); ctx.fill();
+    ctx.globalAlpha=1;
+  }
+
+  // ── SUN (day/dusk only) ──
+  if (biome <= 1) {
+    const sx=W*(biome===0?0.85:0.78), sy=GROUND*(biome===0?0.15:0.22);
+    const sg=ctx.createRadialGradient(sx,sy,0,sx,sy,biome===0?55:65);
+    if(biome===0){
+      sg.addColorStop(0,'rgba(255,255,200,0.95)');
+      sg.addColorStop(0.4,'rgba(255,240,100,0.4)');
+      sg.addColorStop(1,'rgba(255,200,50,0)');
+    } else {
+      sg.addColorStop(0,'rgba(255,240,150,0.9)');
+      sg.addColorStop(0.4,'rgba(255,160,50,0.45)');
+      sg.addColorStop(1,'rgba(255,80,0,0)');
+    }
+    ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(sx,sy,biome===0?55:65,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=biome===0?'rgba(255,255,220,0.95)':'rgba(255,245,170,0.95)';
+    ctx.beginPath(); ctx.arc(sx,sy,biome===0?15:18,0,Math.PI*2); ctx.fill();
+  }
+
+  // ── CLOUDS ──
+  const cloudColor = biome===4?'rgba(240,248,255,0.9)':biome===3?'rgba(160,160,175,0.8)':biome===2?'rgba(60,60,100,0.35)':'rgba(255,255,255,0.7)';
+  const numClouds = biome===3?8:4;
+  for(let i=0;i<numClouds;i++){
+    const cx=((W*0.15+i*(W/numClouds))+(groundOff*(0.15+i*0.04)))%W;
+    const cy=GROUND*(0.12+i*0.06);
+    const cw=60+i*20, ch=20+i*5;
+    ctx.fillStyle=cloudColor;
+    ctx.beginPath(); ctx.ellipse(cx,cy,cw/2,ch/2,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx-cw*0.25,cy+ch*0.1,cw*0.32,ch*0.45,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx+cw*0.28,cy+ch*0.05,cw*0.28,ch*0.4,0,0,Math.PI*2); ctx.fill();
+  }
+
+  // ── RAIN ──
+  if (biome === 3) {
+    ctx.strokeStyle='rgba(150,180,220,0.5)'; ctx.lineWidth=1;
+    for(let i=0;i<60;i++){
+      const rx=((i*137+groundOff*4)%W);
+      const ry=((frame*8+i*43)%(GROUND+20))-10;
+      ctx.beginPath(); ctx.moveTo(rx,ry); ctx.lineTo(rx-3,ry+14); ctx.stroke();
+    }
+  }
+
+  // ── SNOW ──
+  if (biome === 4) {
+    ctx.fillStyle='rgba(230,245,255,0.8)';
+    for(let i=0;i<50;i++){
+      const sx=((i*173+groundOff*1.5)%W);
+      const sy=((frame*2+i*61)%(GROUND+10))-5;
+      const sr=1+Math.sin(i*2.3)*1;
+      ctx.beginPath(); ctx.arc(sx,sy,sr,0,Math.PI*2); ctx.fill();
+    }
+    // snow on ground
+    const sg2=ctx.createLinearGradient(0,GROUND-4,0,GROUND+10);
+    sg2.addColorStop(0,'rgba(230,245,255,0.9)');
+    sg2.addColorStop(1,'rgba(200,230,255,0)');
+    ctx.fillStyle=sg2; ctx.fillRect(0,GROUND-4,W,14);
+  }
+
+  // ── MOVING MOUNTAINS — two parallax layers ──
+  const mColors = biome===2?['rgba(10,10,40,0.9)','rgba(20,20,60,0.7)']:
+                  biome===4?['rgba(180,205,220,0.8)','rgba(200,220,235,0.65)']:
+                  biome===3?['rgba(50,50,65,0.8)','rgba(70,70,90,0.6)']:
+                  ['rgba(55,18,0,0.6)','rgba(80,28,0,0.45)'];
+
+  // mountains removed
+
+  // ── GROUND ──
+  let gc1, gc2, gc3, gline;
+  if (biome===4) { gc1='#c8dde8'; gc2='#8aaabb'; gc3='#4a6070'; gline='rgba(200,230,245,0.3)'; }
+  else if (biome===2) { gc1='#1a2230'; gc2='#0d1520'; gc3='#06090f'; gline='rgba(40,80,120,0.3)'; }
+  else if (biome===3) { gc1='#4a5560'; gc2='#30383f'; gc3='#181e22'; gline='rgba(100,130,160,0.3)'; }
+  else { gc1='#8b4010'; gc2='#5a2806'; gc3='#1a0800'; gline='rgba(220,140,70,0.22)'; }
+
+  const gg=ctx.createLinearGradient(0,GROUND,0,H);
+  gg.addColorStop(0,gc1); gg.addColorStop(0.2,gc2); gg.addColorStop(1,gc3);
+  ctx.fillStyle=gg; ctx.fillRect(0,GROUND,W,H-GROUND);
+  ctx.fillStyle=biome===4?'#d8eef8':biome===2?'#253040':biome===3?'#556070':'#c86030';
+  ctx.fillRect(0,GROUND,W,3);
+  ctx.fillStyle=biome===4?'#eef8ff':biome===2?'#304050':biome===3?'#6a7880':'#e07040';
+  ctx.fillRect(0,GROUND,W,1.5);
+
+  // scrolling dashes
+  ctx.save();
+  ctx.strokeStyle=gline; ctx.lineWidth=1.5;
+  ctx.setLineDash([20,35]); ctx.lineDashOffset=-groundOff;
+  ctx.beginPath(); ctx.moveTo(0,GROUND+11); ctx.lineTo(W,GROUND+11); ctx.stroke();
+  ctx.setLineDash([]); ctx.restore();
+
+  // pebbles / snowdrifts
+  ctx.fillStyle=biome===4?'rgba(200,230,248,0.4)':biome===2?'rgba(30,50,80,0.4)':'rgba(170,90,30,0.2)';
+  const poff=groundOff%90;
+  for(let px=-poff;px<W;px+=90){
+    ctx.beginPath(); ctx.ellipse(px+20,GROUND+22,7,3.5,0.2,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(px+60,GROUND+30,4,2,-0.1,0,Math.PI*2); ctx.fill();
+  }
+
+  // ── BIOME TRANSITION FLASH ──
+  const biomeFrac = (score%100)/100;
+  if(biomeFrac < 0.06) {
+    ctx.fillStyle=`rgba(255,255,255,${(0.06-biomeFrac)*4})`;
+    ctx.fillRect(0,0,W,H);
+  }
+}
+
+
+// =============================================================
+//  DRAW HUD
+// =============================================================
+function drawHUD() {
+  ctx.save();
+  ctx.font = 'bold 13px "Courier New"';
+  ctx.fillStyle = 'rgba(255,180,80,0.35)';
+  ctx.textAlign = 'right';
+  const lvl = Math.floor(score / 100) + 1;
+  ctx.fillText('HI ' + String(hiScore).padStart(5,'0') + '  ' + String(Math.floor(score)).padStart(5,'0'), W-14, 22);
+  // Lives as paw prints / hearts top-left
+  for (let i = 0; i < Math.max(lives,0); i++) {
+    const hx = 14 + i * 22, hy = 14;
+    ctx.fillStyle = 'rgba(255,80,80,0.85)';
+    ctx.beginPath();
+    ctx.arc(hx,     hy-3, 5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath();
+    ctx.arc(hx+8,   hy-3, 5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(hx-5, hy-1);
+    ctx.lineTo(hx+4, hy+9);
+    ctx.lineTo(hx+13,hy-1);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// =============================================================
+//  DRAW OVERLAY (start / game over)
+// =============================================================
+function drawOverlay() {
+  ctx.save();
+  ctx.fillStyle='rgba(10,4,0,0.82)';
+  ctx.fillRect(0,0,W,H);
+
+  ctx.textAlign='center';
+  ctx.fillStyle='#f5e0c0';
+
+  if (!gameOver) {
+    ctx.font='bold 38px "Courier New"';
+    ctx.fillText('LION RUN', W/2, H/2 - 40);
+    ctx.font='12px "Courier New"';
+    ctx.fillStyle='rgba(255,200,120,0.55)';
+    ctx.fillText('PRESS SPACE · CLICK · TAP  TO START', W/2, H/2 + 5);
+  } else {
+    ctx.font='bold 32px "Courier New"';
+    ctx.fillStyle='#ff6600';
+    ctx.fillText('GAME OVER', W/2, H/2 - 45);
+    ctx.font='13px "Courier New"';
+    ctx.fillStyle='rgba(255,200,120,0.7)';
+    ctx.fillText('SCORE: ' + String(Math.floor(score)).padStart(5,'0') + '   BEST: ' + String(hiScore).padStart(5,'0'), W/2, H/2);
+    ctx.fillStyle='rgba(255,200,120,0.45)';
+    ctx.fillText('PRESS SPACE · CLICK · TAP  TO RETRY', W/2, H/2 + 34);
+  }
+  ctx.restore();
+}
+
+// =============================================================
+//  DRAW PARTICLES
+// =============================================================
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, p.life * 0.9);
+    ctx.fillStyle = p.color;
+    ctx.shadowColor = p.color; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// =============================================================
+//  HELPERS
+// =============================================================
+function fillRR(x,y,w,h,r,fill) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x,y,w,h,r); else ctx.rect(x,y,w,h);
+  ctx.fillStyle=fill; ctx.fill();
+}
+function strokeRR(x,y,w,h,r,stroke,lw) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x,y,w,h,r); else ctx.rect(x,y,w,h);
+  ctx.strokeStyle=stroke; ctx.lineWidth=lw; ctx.stroke();
+}
+function circle(x,y,r,fill) {
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle=fill; ctx.fill();
+}
+function line(x1,y1,x2,y2) {
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+}
+
+function ding() {
+  try {
+    const AC = new (window.AudioContext||window.webkitAudioContext)();
+    [[880,0],[1100,0.1],[1320,0.2]].forEach(([f,t])=>{
+      const o=AC.createOscillator(), g=AC.createGain();
+      o.connect(g); g.connect(AC.destination);
+      o.frequency.value=f; o.type='sine';
+      g.gain.setValueAtTime(0.18,AC.currentTime+t);
+      g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+t+0.3);
+      o.start(AC.currentTime+t); o.stop(AC.currentTime+t+0.35);
+    });
+  } catch(e){}
+}
+
+function drawMountain(o) {
+  const x=o.x, y=o.y, w=o.w, h=o.h;
+  ctx.save();
+  // biome-aware mountain color
+  const biome=Math.floor(score/100)%5;
+  const mc = biome===2?'#1a2a4a':biome===4?'#c0d8e8':biome===3?'#4a5060':'#7a5028';
+  const mc2= biome===2?'#0e1828':biome===4?'#a0c0d0':biome===3?'#363840':'#5a3818';
+  // main peak
+  const g=ctx.createLinearGradient(x+w*0.4,y,x+w,GROUND);
+  g.addColorStop(0,mc); g.addColorStop(1,mc2);
+  ctx.fillStyle=g;
+  ctx.beginPath();
+  ctx.moveTo(x,GROUND);
+  ctx.lineTo(x+w*0.15,GROUND-h*0.55);
+  ctx.lineTo(x+w*0.4,y);           // main peak
+  ctx.lineTo(x+w*0.68,GROUND-h*0.7);
+  ctx.lineTo(x+w,GROUND);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle=biome===2?'#2a3a6a':'#4a3010'; ctx.lineWidth=2; ctx.stroke();
+  // secondary ridge left
+  ctx.fillStyle=mc2; ctx.globalAlpha=0.7;
+  ctx.beginPath();
+  ctx.moveTo(x,GROUND);
+  ctx.lineTo(x+w*0.12,GROUND-h*0.38);
+  ctx.lineTo(x+w*0.28,GROUND-h*0.2);
+  ctx.lineTo(x+w*0.35,GROUND);
+  ctx.closePath(); ctx.fill();
+  ctx.globalAlpha=1;
+  // snow cap if snow biome OR tall enough
+  if(biome===4||(h>80&&biome!==2)){
+    ctx.fillStyle=biome===4?'rgba(230,248,255,0.95)':' rgba(255,255,255,0.85)';
+    ctx.beginPath();
+    ctx.moveTo(x+w*0.28,y+h*0.28);
+    ctx.lineTo(x+w*0.4,y);
+    ctx.lineTo(x+w*0.54,y+h*0.22);
+    ctx.closePath(); ctx.fill();
+  }
+  // rock texture lines
+  ctx.strokeStyle='rgba(0,0,0,0.1)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(x+w*0.3,y+h*0.4); ctx.lineTo(x+w*0.5,GROUND-h*0.3); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+w*0.5,y+h*0.5); ctx.lineTo(x+w*0.65,GROUND-h*0.2); ctx.stroke();
+  ctx.restore();
+}
+
+// =============================================================
+//  MAIN LOOP
+// =============================================================
+function gameLoop() {
+  ctx.clearRect(0,0,W,H);
+
+  drawBG();
+
+  if (gameRunning) update();
+
+  // Draw obstacles
+  for (const o of obstacles) {
+    if (o.type==='cactus') drawCactus(o);
+    else if (o.type==='bird') drawBird(o);
+    else if (o.type==='rock') drawRock(o);
+  }
+
+  drawDino();
+  drawParticles();
+  drawHUD();
+
+  // Flash on hit
+  if (flashTimer > 0) {
+    ctx.fillStyle=`rgba(255,50,0,${flashTimer/20*0.5})`;
+    ctx.fillRect(0,0,W,H);
+  }
+
+  if (!gameRunning) {
+    drawOverlay();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Boot
+gameLoop();
+</script>
+</body>
+</html>
